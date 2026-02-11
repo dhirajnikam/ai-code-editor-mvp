@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "concurrently \"vite\" \"tsc -p src/main/tsconfig.main.json --watch\" \"tsc -p src/main/tsconfig.preload.json --watch\" \"wait-on http://localhost:5173 && electron .\"",
     "build": "vite build && tsc -p src/main/tsconfig.main.json && tsc -p src/main/tsconfig.preload.json",
-    "start": "electron ."
+    "start": "electron .",
+    "smoke": "node --version",
+    "cli:propose": "tsx tools/propose-edit.ts"
   },
   "keywords": [],
   "author": "",
@@ -20,6 +22,7 @@
     "@vitejs/plugin-react": "^5.1.4",
     "concurrently": "^9.2.1",
     "electron": "^40.3.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.1",
     "wait-on": "^9.0.3"
