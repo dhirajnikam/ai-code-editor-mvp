@@ -3,6 +3,7 @@ declare global {
     api: {
       openFolder(): Promise<string | null>;
       listFiles(rootDir: string): Promise<string[]>;
+      indexProject(rootDir: string): Promise<{ ok: boolean; filesIndexed: number }>; 
       readFile(filePath: string): Promise<string>;
       writeFile(filePath: string, content: string): Promise<boolean>;
       gitInitIfNeeded(rootDir: string): Promise<boolean>;

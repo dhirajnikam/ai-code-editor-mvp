@@ -25,6 +25,12 @@ export function App() {
     const list = await window.api.listFiles(dir);
     setFiles(list);
     setActiveFile(list.find(f => f.endsWith('.ts') || f.endsWith('.tsx') || f.endsWith('.js') || f.endsWith('.jsx')) ?? list[0] ?? null);
+    setBusy('Indexing project (imports graph)...');
+    try {
+      await window.api.indexProject(dir);
+    } catch {
+      // indexing is best-effort
+    }
     setBusy(null);
   }
 
