@@ -7,6 +7,8 @@ import dotenv from 'dotenv';
 import { diffLines } from 'diff';
 import { buildImportGraph, relatedFiles } from './indexer/importGraph';
 
+type SearchHit = { file: string; line: number; text: string };
+
 dotenv.config();
 
 const isDev = !app.isPackaged;
@@ -48,7 +50,7 @@ ipcMain.handle('project:openFolder', async () => {
   return res.filePaths[0] as string;
 });
 
-ipcMain.handle('project:listFiles', async (_evt, rootDir: string) => {
+async function listProjectFiles(rootDir: string): Promise<string[]> {
   async function walk(dir: string, out: string[]) {
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const e of entries) {
@@ -61,6 +63,46 @@ ipcMain.handle('project:listFiles', async (_evt, rootDir: string) => {
   const out: string[] = [];
   await walk(rootDir, out);
   return out;
+}
+
+ipcMain.handle('project:listFiles', async (_evt, rootDir: string) => {
+  return listProjectFiles(rootDir);
+});
+
+ipcMain.handle('project:search', async (_evt, rootDir: string, query: string, limit: number = 50) => {
+  const q = (query || '').trim();
+  if (!q) return [];
+
+  const files = await listProjectFiles(rootDir);
+  const hits: SearchHit[] = [];
+
+  for (const f of files) {
+    if (hits.length >= limit) break;
+    // skip very large files
+    try {
+      const st = await fs.stat(f);
+      if (st.size > 512_000) continue;
+    } catch {
+      continue;
+    }
+
+    let text = '';
+    try {
+      text = await fs.readFile(f, 'utf8');
+    } catch {
+      continue;
+    }
+
+    const lines = text.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      if (hits.length >= limit) break;
+      if (lines[i].toLowerCase().includes(q.toLowerCase())) {
+        hits.push({ file: f, line: i + 1, text: lines[i].slice(0, 400) });
+      }
+    }
+  }
+
+  return hits;
 });
 
 ipcMain.handle('project:index', async (_evt, rootDir: string) => {
@@ -111,6 +153,41 @@ ipcMain.handle('git:commitAll', async (_evt, rootDir: string, message: string) =
   if (status.files.length === 0) return { committed: false };
   const out = await git.commit(message);
   return { committed: true, out };
+});
+
+async function brainFetch(brainUrl: string, pathName: string, opts: { method?: string; body?: any } = {}) {
+  const url = new URL(pathName, brainUrl).toString();
+  const method = opts.method || 'GET';
+  const headers: any = {};
+  let body: any = undefined;
+  if (opts.body !== undefined) {
+    headers['content-type'] = 'application/json';
+    body = JSON.stringify(opts.body);
+  }
+  const res = await fetch(url, { method, headers, body });
+  const text = await res.text();
+  let json: any;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = { raw: text };
+  }
+  if (!res.ok) {
+    throw new Error(`Brain request failed ${res.status}: ${JSON.stringify(json)}`);
+  }
+  return json;
+}
+
+ipcMain.handle('brain:health', async (_evt, brainUrl: string) => {
+  return brainFetch(brainUrl, '/health');
+});
+
+ipcMain.handle('brain:retrieve', async (_evt, brainUrl: string, body: any) => {
+  return brainFetch(brainUrl, '/retrieve', { method: 'POST', body });
+});
+
+ipcMain.handle('brain:graph', async (_evt, brainUrl: string) => {
+  return brainFetch(brainUrl, '/graph');
 });
 
 ipcMain.handle('ai:proposeEdit', async (_evt, args: { rootDir: string; filePath: string; instruction: string; }) => {
