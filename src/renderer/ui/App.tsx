@@ -16,6 +16,8 @@ export function App() {
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [instruction, setInstruction] = useState('');
   const [proposed, setProposed] = useState<null | { before: string; after: string; patches: any[] }>(null);
+  const [proposedMulti, setProposedMulti] = useState<null | { files: Array<{ filePath: string; before: string; after: string; patches: any[] }>; plan: any }>(null);
+  const [activeProposedFile, setActiveProposedFile] = useState<string | null>(null);
   const [trace, setTrace] = useState<any>(null);
 
   const [chatInput, setChatInput] = useState('');
@@ -67,21 +69,27 @@ export function App() {
   async function proposeEdit() {
     if (!rootDir || !activeFile || !instruction.trim()) return;
     setError(null);
+    setProposed(null);
+    setProposedMulti(null);
+    setActiveProposedFile(null);
+
     setBusy('Retrieving brain trace...');
+    let contextPack: string | undefined = undefined;
     try {
-      // Ask the brain for retrieval trace; show it even if the code edit uses local related-file context.
+      // Ask the brain for retrieval trace; we also pass context_pack into multi-file proposing.
       try {
         const currentRel = rootDir ? rel(activeFile) : activeFile;
         const r = await window.api.brainRetrieve(brainUrl, { query: instruction, current_file: currentRel, mode: 'balanced', priority: 'quality' });
         setTrace(r);
+        contextPack = r?.context_pack;
       } catch {
-        // best-effort
         setTrace(null);
       }
 
-      setBusy('Calling OpenAI...');
-      const out = await window.api.aiProposeEdit({ rootDir, filePath: activeFile, instruction });
-      setProposed(out);
+      setBusy('Calling OpenAI (multi-file)...');
+      const out = await window.api.aiProposeEditsMulti({ rootDir, entryFilePath: activeFile, instruction, contextPack, fileLimit: 8 });
+      setProposedMulti(out);
+      setActiveProposedFile(out.files[0]?.filePath ?? null);
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
@@ -90,7 +98,38 @@ export function App() {
   }
 
   async function applyEdit() {
-    if (!rootDir || !activeFile || !proposed) return;
+    if (!rootDir || !instruction.trim()) return;
+
+    // multi-file apply
+    if (proposedMulti?.files?.length) {
+      setError(null);
+      setBusy('Creating branch...');
+      try {
+        const slug = instruction.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
+        const branch = `ai/${Date.now()}-${slug || 'multi'}`;
+        await window.api.gitCreateBranch(rootDir, branch);
+
+        setBusy('Writing files...');
+        for (const f of proposedMulti.files) {
+          await window.api.writeFile(f.filePath, f.after);
+        }
+
+        setBusy('Committing...');
+        await window.api.gitCommitAll(rootDir, `[AI][multi] ${instruction.slice(0, 72)} (files: ${proposedMulti.files.length})`);
+
+        setProposedMulti(null);
+        setActiveProposedFile(null);
+        setInstruction('');
+        return;
+      } catch (e: any) {
+        setError(String(e?.message ?? e));
+      } finally {
+        setBusy(null);
+      }
+    }
+
+    // single-file fallback
+    if (!activeFile || !proposed) return;
     setError(null);
     setBusy('Writing file + committing...');
     try {
@@ -196,10 +235,49 @@ export function App() {
         </div>
       );
     }
+
+    const intent = trace?.trace?.intent;
+    const traversal = trace?.trace?.traversal;
+    const selection = trace?.trace?.selection;
+
     return (
       <div style={{ flex: 1, border: '1px solid #ddd', borderRadius: 8, padding: 10, overflow: 'auto' }}>
-        <div style={{ fontWeight: 700, marginBottom: 6 }}>Decision / Trace</div>
-        <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{JSON.stringify(trace, null, 2)}</pre>
+        <div style={{ fontWeight: 700, marginBottom: 8 }}>Decision / Trace</div>
+
+        <div style={{ fontSize: 12, color: '#333' }}>
+          <div><b>Model:</b> {trace.model} · <b>Mode:</b> {trace.mode} · <b>Priority:</b> {trace.priority} · <b>Budget:</b> {trace.token_budget}</div>
+        </div>
+
+        <hr />
+
+        <div style={{ fontSize: 12 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Intent</div>
+          <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{JSON.stringify(intent ?? {}, null, 2)}</pre>
+        </div>
+
+        <hr />
+
+        <div style={{ fontSize: 12 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Traversal</div>
+          <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{JSON.stringify(traversal ?? {}, null, 2)}</pre>
+        </div>
+
+        <hr />
+
+        <div style={{ fontSize: 12 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Selection</div>
+          <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{JSON.stringify(selection ?? [], null, 2)}</pre>
+        </div>
+
+        <hr />
+
+        <div style={{ fontSize: 12 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Context Pack</div>
+          <details>
+            <summary style={{ cursor: 'pointer' }}>Show</summary>
+            <pre style={{ fontSize: 12, margin: 0, whiteSpace: 'pre-wrap' }}>{trace.context_pack ?? ''}</pre>
+          </details>
+        </div>
       </div>
     );
   }
@@ -225,7 +303,43 @@ export function App() {
 
         <div style={{ display: 'flex', gap: 12, minHeight: 0, flex: 1 }}>
           <div style={{ flex: 2, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {proposed ? (
+            {proposedMulti?.files?.length ? (
+              <>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button onClick={() => { setProposedMulti(null); setActiveProposedFile(null); }}>Discard</button>
+                  <button onClick={applyEdit}>Apply + Commit</button>
+                  <span style={{ fontSize: 12, color: '#555' }}>Files: {proposedMulti.files.length}</span>
+                </div>
+
+                <div style={{ display: 'flex', gap: 10, minHeight: 0, flex: 1 }}>
+                  <div style={{ width: 240, border: '1px solid #ddd', borderRadius: 8, overflow: 'auto' }}>
+                    {proposedMulti.files.map(f => (
+                      <div
+                        key={f.filePath}
+                        onClick={() => setActiveProposedFile(f.filePath)}
+                        style={{
+                          cursor: 'pointer',
+                          padding: '6px 8px',
+                          borderBottom: '1px solid #eee',
+                          background: f.filePath === activeProposedFile ? '#eef' : 'transparent',
+                          fontSize: 12,
+                        }}
+                        title={f.filePath}
+                      >
+                        {rootDir ? rel(f.filePath) : f.filePath}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
+                    {(() => {
+                      const cur = proposedMulti.files.find(x => x.filePath === activeProposedFile) ?? proposedMulti.files[0];
+                      return cur ? <DiffView patches={cur.patches} /> : null;
+                    })()}
+                  </div>
+                </div>
+              </>
+            ) : proposed ? (
               <>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button onClick={() => setProposed(null)}>Discard</button>

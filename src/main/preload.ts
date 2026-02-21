@@ -8,7 +8,11 @@ contextBridge.exposeInMainWorld('api', {
   writeFile: (filePath: string, content: string) => ipcRenderer.invoke('file:write', filePath, content),
   gitInitIfNeeded: (rootDir: string) => ipcRenderer.invoke('git:initIfNeeded', rootDir),
   gitCommitAll: (rootDir: string, message: string) => ipcRenderer.invoke('git:commitAll', rootDir, message),
+  gitCreateBranch: (rootDir: string, name: string) => ipcRenderer.invoke('git:createBranch', rootDir, name),
+
   aiProposeEdit: (args: { rootDir: string; filePath: string; instruction: string }) => ipcRenderer.invoke('ai:proposeEdit', args),
+  aiProposeEditsMulti: (args: { rootDir: string; entryFilePath: string; instruction: string; contextPack?: string; fileLimit?: number }) =>
+    ipcRenderer.invoke('ai:proposeEditsMulti', args),
 
   // Brain (remote)
   brainHealth: (brainUrl: string) => ipcRenderer.invoke('brain:health', brainUrl),

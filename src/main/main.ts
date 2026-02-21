@@ -155,6 +155,13 @@ ipcMain.handle('git:commitAll', async (_evt, rootDir: string, message: string) =
   return { committed: true, out };
 });
 
+ipcMain.handle('git:createBranch', async (_evt, rootDir: string, name: string) => {
+  const git = simpleGit({ baseDir: rootDir });
+  const branch = name.replace(/[^a-zA-Z0-9/_-]/g, '-').slice(0, 80);
+  await git.checkoutLocalBranch(branch);
+  return { ok: true, branch };
+});
+
 async function brainFetch(brainUrl: string, pathName: string, opts: { method?: string; body?: any } = {}) {
   const url = new URL(pathName, brainUrl).toString();
   const method = opts.method || 'GET';
@@ -188,6 +195,131 @@ ipcMain.handle('brain:retrieve', async (_evt, brainUrl: string, body: any) => {
 
 ipcMain.handle('brain:graph', async (_evt, brainUrl: string) => {
   return brainFetch(brainUrl, '/graph');
+});
+
+ipcMain.handle('ai:proposeEditsMulti', async (_evt, args: { rootDir: string; entryFilePath: string; instruction: string; contextPack?: string; fileLimit?: number }) => {
+  const { rootDir, entryFilePath, instruction } = args;
+  const fileLimit = Math.max(1, Math.min(Number(args.fileLimit ?? 6), 12));
+  const entryRel = path.relative(rootDir, entryFilePath);
+
+  // candidate set: entry + related files from lightweight import index
+  let candidates: string[] = [entryRel];
+  try {
+    const idxRaw = await fs.readFile(path.join(rootDir, '.aice', 'index.json'), 'utf8');
+    const idx = JSON.parse(idxRaw);
+    const rels: string[] = relatedFiles(idx, entryRel, 2, 20);
+    candidates = Array.from(new Set([entryRel, ...rels])).slice(0, 30);
+  } catch {
+    // no index
+  }
+
+  // Load contents (cap per file)
+  const fileBlobs: Array<{ path: string; content: string }> = [];
+  for (const relPath of candidates) {
+    const abs = path.join(rootDir, relPath);
+    try {
+      const c = await fs.readFile(abs, 'utf8');
+      fileBlobs.push({ path: relPath, content: c.slice(0, 12000) });
+    } catch {
+      // ignore
+    }
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY not set. Create a .env file (see .env.example).');
+  const client = new OpenAI({ apiKey });
+  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+  // 1) Plan which files to edit
+  const planSystem = [
+    'You are a senior software engineer planning a multi-file edit.',
+    'Return STRICT JSON: {"files": [{"path":"...","reason":"..."}], "notes":"..."}.',
+    'Only include files from the provided candidate list.',
+    'Prefer the smallest set of files required.',
+  ].join('\n');
+
+  const planUser = [
+    `Instruction: ${instruction}`,
+    `Entry file: ${entryRel}`,
+    `Candidate files (${fileBlobs.length}):`,
+    ...fileBlobs.map(f => `- ${f.path}`),
+    args.contextPack ? `\nBRAIN CONTEXT_PACK:\n${args.contextPack}` : '',
+  ].join('\n');
+
+  const planResp = await client.chat.completions.create({
+    model,
+    messages: [
+      { role: 'system', content: planSystem },
+      { role: 'user', content: planUser },
+    ],
+    temperature: 0.1,
+    response_format: { type: 'json_object' } as any,
+  });
+
+  let plan: any = {};
+  try {
+    plan = JSON.parse(planResp.choices[0]?.message?.content || '{}');
+  } catch {
+    plan = { files: [{ path: entryRel, reason: 'fallback' }], notes: 'planner returned non-json' };
+  }
+
+  const chosen: string[] = Array.isArray(plan.files)
+    ? plan.files.map((x: any) => String(x.path || '')).filter(Boolean)
+    : [entryRel];
+
+  const finalList = Array.from(new Set([entryRel, ...chosen])).filter(p => candidates.includes(p)).slice(0, fileLimit);
+
+  // 2) Produce updated contents per file
+  const outFiles: Array<{ filePath: string; before: string; after: string; patches: any[] }> = [];
+
+  const globalContext = [
+    args.contextPack ? `BRAIN CONTEXT_PACK:\n${args.contextPack}` : '',
+    'FILES (read-only, truncated):',
+    ...fileBlobs.map(f => `FILE: ${f.path}\n---\n${f.content}\n---`),
+  ].filter(Boolean).join('\n\n');
+
+  for (const relPath of finalList) {
+    const abs = path.join(rootDir, relPath);
+    const before = await fs.readFile(abs, 'utf8');
+
+    const sys = [
+      'You are an AI code editor.',
+      'You are editing ONE file at a time as part of a multi-file change.',
+      'Return ONLY the full updated file content for the target file.',
+      'Keep changes minimal and consistent with the rest of the project.',
+    ].join('\n');
+
+    const user = [
+      `Instruction: ${instruction}`,
+      `Target file: ${relPath}`,
+      `Plan summary: ${JSON.stringify(plan).slice(0, 2000)}`,
+      '--- CURRENT CONTENT ---',
+      before,
+      '--- END ---',
+      globalContext ? `\n\n${globalContext}` : '',
+    ].join('\n');
+
+    const resp = await client.chat.completions.create({
+      model,
+      messages: [
+        { role: 'system', content: sys },
+        { role: 'user', content: user },
+      ],
+      temperature: 0.2,
+    });
+
+    const after = resp.choices[0]?.message?.content ?? '';
+    const patches = diffLines(before, after);
+
+    outFiles.push({
+      filePath: abs,
+      before,
+      after,
+      patches: patches.map(p => ({ added: !!p.added, removed: !!p.removed, value: p.value })),
+    });
+  }
+
+  return { files: outFiles, plan };
 });
 
 ipcMain.handle('ai:proposeEdit', async (_evt, args: { rootDir: string; filePath: string; instruction: string; }) => {

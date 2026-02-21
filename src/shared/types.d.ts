@@ -8,7 +8,10 @@ declare global {
       writeFile(filePath: string, content: string): Promise<boolean>;
       gitInitIfNeeded(rootDir: string): Promise<boolean>;
       gitCommitAll(rootDir: string, message: string): Promise<any>;
+      gitCreateBranch(rootDir: string, name: string): Promise<{ ok: boolean; branch: string }>;
+
       aiProposeEdit(args: { rootDir: string; filePath: string; instruction: string; }): Promise<{ before: string; after: string; patches: Array<{added:boolean;removed:boolean;value:string}> }>;
+      aiProposeEditsMulti(args: { rootDir: string; entryFilePath: string; instruction: string; contextPack?: string; fileLimit?: number }): Promise<{ files: Array<{ filePath: string; before: string; after: string; patches: Array<{added:boolean;removed:boolean;value:string}> }>; plan: any }>;
 
       brainHealth(brainUrl: string): Promise<any>;
       brainRetrieve(brainUrl: string, body: any): Promise<any>;
